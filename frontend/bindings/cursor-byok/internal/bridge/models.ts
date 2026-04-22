@@ -285,6 +285,7 @@ export class UsageStats {
 export class UserConfig {
     "baseURL": string;
     "modelAdapters": ModelAdapterConfig[];
+    "activeModelID"?: string;
     "commitModelID"?: string;
     "reviewModelID"?: string;
 

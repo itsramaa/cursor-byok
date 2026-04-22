@@ -52,6 +52,10 @@ func adapterListFor(cfgDir string) []relay.AdapterInfo {
 	if err != nil {
 		return nil
 	}
+	return adapterListFromConfig(c)
+}
+
+func adapterListFromConfig(c UserConfig) []relay.AdapterInfo {
 	out := make([]relay.AdapterInfo, 0, len(c.ModelAdapters))
 	for _, a := range c.ModelAdapters {
 		if a.ModelID == "" {
@@ -69,6 +73,27 @@ func adapterListFor(cfgDir string) []relay.AdapterInfo {
 			ThinkingBudget:  parseIntSafe(a.ThinkingBudget),
 		})
 	}
+	return prioritizeActiveAdapter(out, strings.TrimSpace(c.ActiveModelID))
+}
+
+func prioritizeActiveAdapter(adapters []relay.AdapterInfo, activeModelID string) []relay.AdapterInfo {
+	if len(adapters) < 2 || activeModelID == "" {
+		return adapters
+	}
+	idx := -1
+	for i, a := range adapters {
+		if strings.EqualFold(strings.TrimSpace(a.ModelID), activeModelID) {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return adapters
+	}
+	out := make([]relay.AdapterInfo, 0, len(adapters))
+	out = append(out, adapters[idx])
+	out = append(out, adapters[:idx]...)
+	out = append(out, adapters[idx+1:]...)
 	return out
 }
 
@@ -250,23 +275,7 @@ func NewProxyService() (*ProxyService, error) {
 		if err != nil {
 			return nil
 		}
-		out := make([]relay.AdapterInfo, 0, len(c.ModelAdapters))
-		for _, a := range c.ModelAdapters {
-			if a.ModelID == "" {
-				continue
-			}
-			out = append(out, relay.AdapterInfo{
-				DisplayName:     a.DisplayName,
-				Type:            a.Type,
-				ModelID:         a.ModelID,
-				BaseURL:         a.BaseURL,
-				APIKey:          a.APIKey,
-				ReasoningEffort: a.ReasoningEffort,
-				MaxOutputTokens: parseIntSafe(a.MaxOutputTokens),
-				ThinkingBudget:  parseIntSafe(a.ThinkingBudget),
-			})
-		}
-		return out
+		return adapterListFromConfig(c)
 	})
 	return svc, nil
 }
@@ -428,6 +437,19 @@ func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
 }
 
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
+	cfg.ActiveModelID = strings.TrimSpace(cfg.ActiveModelID)
+	if cfg.ActiveModelID != "" {
+		found := false
+		for _, a := range cfg.ModelAdapters {
+			if strings.EqualFold(strings.TrimSpace(a.ModelID), cfg.ActiveModelID) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.ActiveModelID = ""
+		}
+	}
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

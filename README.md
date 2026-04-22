@@ -189,6 +189,7 @@ The Stats tab aggregates every `turns/*/summary.json` on disk.
 
 ```jsonc
 {
+  "activeModelID": "gpt-4o",
   "modelAdapters": [
     {
       "displayName": "GPT-4o",
@@ -205,8 +206,9 @@ The Stats tab aggregates every `turns/*/summary.json` on disk.
 }
 ```
 
-The first adapter in the list is used as the active model and is pinned into
-every Cursor feature slot (composer / cmd-K / agent / etc.).
+`activeModelID` controls which model new chats and unqualified requests fall
+back to by default. If it is empty, cursor-byok falls back to the first
+configured adapter.
 
 ---
 

@@ -32,6 +32,7 @@ type ModelAdapterConfig struct {
 type UserConfig struct {
 	BaseURL       string               `json:"baseURL"`
 	ModelAdapters []ModelAdapterConfig `json:"modelAdapters"`
+	ActiveModelID string               `json:"activeModelID,omitempty"`
 	CommitModelID string               `json:"commitModelID,omitempty"`
 	ReviewModelID string               `json:"reviewModelID,omitempty"`
 	// CloseAction remembers what the user picked in the "Quit or minimize

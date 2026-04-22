@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 -
 
+## [1.0.1] - 2026-04-22
+
+### Fixed
+
+- Decoupled the default active model from adapter order so Cursor no longer keeps routing new chats to whichever adapter happens to be listed first.
+- Added an explicit default active model setting in the dashboard and use it for Cursor model pinning, synthetic model defaults, and fallback request routing.
+- Clear specialized/default model selections when their adapter is deleted so config state stays valid.
+
 ## [1.0.0] - 2026-04-22
 
 Initial public release of `cursor-byok`.

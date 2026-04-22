@@ -5,7 +5,7 @@ import { Window, Events, Browser, System } from "@wailsio/runtime";
 import OpenAIMark from "./logos/OpenAIMark.vue";
 import AnthropicMark from "./logos/AnthropicMark.vue";
 
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.0.1";
 const GITHUB_REPO = "Yimikami/cursor-byok";
 const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
 
@@ -62,6 +62,7 @@ type ModelAdapter = {
 type UserConfig = {
   baseURL: string;
   modelAdapters: ModelAdapter[];
+  activeModelID?: string;
   commitModelID?: string;
   reviewModelID?: string;
 };
@@ -145,7 +146,7 @@ const state = ref<ProxyState>({
   caPath: "",
   caInstalled: false,
 });
-const cfg = ref<UserConfig>({ baseURL: "", modelAdapters: [] });
+const cfg = ref<UserConfig>({ baseURL: "", modelAdapters: [], activeModelID: "" });
 const tweaks = ref<CursorTweaks>({
   path: "",
   found: false,
@@ -243,6 +244,7 @@ async function refresh() {
   state.value = (await ProxyService.GetState()) as ProxyState;
   const c = (await ProxyService.LoadUserConfig()) as UserConfig;
   if (!c.modelAdapters) c.modelAdapters = [];
+  if (!c.activeModelID) c.activeModelID = "";
   if (!c.commitModelID) c.commitModelID = "";
   if (!c.reviewModelID) c.reviewModelID = "";
   cfg.value = c;
@@ -477,7 +479,17 @@ async function duplicate(i: number) {
 }
 
 async function removeAdapter(i: number) {
+  const removed = cfg.value.modelAdapters[i];
   cfg.value.modelAdapters.splice(i, 1);
+  if (removed && cfg.value.activeModelID === removed.modelID) {
+    cfg.value.activeModelID = "";
+  }
+  if (removed && cfg.value.commitModelID === removed.modelID) {
+    cfg.value.commitModelID = "";
+  }
+  if (removed && cfg.value.reviewModelID === removed.modelID) {
+    cfg.value.reviewModelID = "";
+  }
   await persistConfig();
 }
 
@@ -725,6 +737,26 @@ onBeforeUnmount(() => {
 
       <!-- Settings rows -->
       <div class="card" style="margin-top: 16px">
+        <div class="row">
+          <div class="row-text">
+            <div class="row-title">Default active model</div>
+            <div class="row-desc">
+              Controls which model new chats and unqualified requests use by default.
+            </div>
+            <div class="special-model-grid">
+              <label class="special-model-field">
+                <span>New chats</span>
+                <select v-model="cfg.activeModelID" @change="persistConfig">
+                  <option value="">First configured model</option>
+                  <option v-for="opt in modelOptions" :key="`active-${opt.value}`" :value="opt.value">
+                    {{ opt.label }}
+                  </option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="hr" />
         <div class="row">
           <div class="row-text">
             <div class="row-title">Specialized model routing</div>

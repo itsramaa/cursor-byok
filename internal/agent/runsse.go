@@ -107,6 +107,8 @@ func ResolveAdapterForModel(adapters []AdapterTarget, requested string) (Adapter
 			}
 		}
 	}
+	// The adapter slice arrives priority-sorted by the bridge, with the
+	// configured active model first.
 	return adapters[0], true
 }
 
