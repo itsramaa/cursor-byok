@@ -23,7 +23,7 @@ any OpenAI-compatible or Anthropic provider you configure.
 - **Full agent loop** — tool calls, file reads/writes, shell exec, MCP tools,
   Plan mode with live `.plan.md` panel updates, mode switching (Agent / Ask /
   Plan / Debug) — all routed through your own model.
-- **Drop-in for Cursor** — no Cursor account needed. A synthetic Pro session is
+- **Drop-in for Cursor** — no Cursor Pro account needed. A synthetic Pro session is
   injected into Cursor's local SQLite so the chat picker and agent UI behave as
   if you were signed in.
 - **System tray app** — built with Wails 3 (Go backend + Vue 3 frontend), start
