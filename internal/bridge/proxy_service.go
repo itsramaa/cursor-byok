@@ -15,664 +15,1221 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"cursor-byok/internal/agent"
 	"cursor-byok/internal/certs"
 	"cursor-byok/internal/cursor"
 	"cursor-byok/internal/mitm"
 	"cursor-byok/internal/relay"
+
 )
 
 const (
 	defaultListenAddr = "127.0.0.1:18080"
-	defaultUpstream   = "https://api2.cursor.sh"
+
+	defaultUpstream = "https://api2.cursor.sh"
 )
 
 type ProxyService struct {
-	mu              sync.RWMutex
-	state           ProxyState
-	proxy           *mitm.Server
-	ca              *certs.CA
-	gateway         *relay.Gateway
-	cfgDir          string
-	onStateChange   func(running bool)
+	mu sync.RWMutex
+
+	state ProxyState
+
+	proxy *mitm.Server
+
+	ca *certs.CA
+
+	gateway *relay.Gateway
+
+	cfgDir string
+
+	onStateChange func(running bool)
+
 	gatewayAdapters func() []relay.AdapterInfo
+
 	// quitCb / hideCb are wired up by main.go so the frontend's close
+
 	// dialog can drive the window without needing direct access to the
+
 	// Wails application handle. Both run in a goroutine so the Wails RPC
+
 	// that triggered them can return cleanly before we tear the app down.
+
 	quitCb func()
+
 	hideCb func()
 }
 
 // adapterListFor reads the user config and returns the BYOK adapter list
+
 // suitable for relay rewrites and SQLite pinning.
+
 func adapterListFor(cfgDir string) []relay.AdapterInfo {
+
 	c, err := readConfig(cfgDir)
+
 	if err != nil {
+
 		return nil
+
 	}
+
 	return adapterListFromConfig(c)
+
 }
 
 func adapterListFromConfig(c UserConfig) []relay.AdapterInfo {
+
 	out := make([]relay.AdapterInfo, 0, len(c.ModelAdapters))
+
 	for _, a := range c.ModelAdapters {
+
 		if a.ModelID == "" {
+
 			continue
+
 		}
+
 		out = append(out, relay.AdapterInfo{
-			DisplayName:     a.DisplayName,
-			Type:            a.Type,
-			ModelID:         a.ModelID,
-			BaseURL:         a.BaseURL,
-			APIKey:          a.APIKey,
+
+			DisplayName: a.DisplayName,
+
+			Type: a.Type,
+
+			ModelID: a.ModelID,
+
+			BaseURL: a.BaseURL,
+
+			APIKey: a.APIKey,
+
 			ReasoningEffort: a.ReasoningEffort,
-			ServiceTier:     a.ServiceTier,
+
+			ServiceTier: a.ServiceTier,
+
 			MaxOutputTokens: parseIntSafe(a.MaxOutputTokens),
-			ThinkingBudget:  parseIntSafe(a.ThinkingBudget),
-			ContextWindow:   parseIntSafe(a.ContextWindow),
+
+			ThinkingBudget: parseIntSafe(a.ThinkingBudget),
+
+			ContextWindow: parseIntSafe(a.ContextWindow),
 		})
+
 	}
+
 	return prioritizeActiveAdapter(out, strings.TrimSpace(c.ActiveModelID))
+
 }
 
 func prioritizeActiveAdapter(adapters []relay.AdapterInfo, activeModelID string) []relay.AdapterInfo {
+
 	if len(adapters) < 2 || activeModelID == "" {
+
 		return adapters
+
 	}
+
 	idx := -1
+
 	for i, a := range adapters {
+
 		if strings.EqualFold(strings.TrimSpace(a.ModelID), activeModelID) {
+
 			idx = i
+
 			break
+
 		}
+
 	}
+
 	if idx <= 0 {
+
 		return adapters
+
 	}
+
 	out := make([]relay.AdapterInfo, 0, len(adapters))
+
 	out = append(out, adapters[idx])
+
 	out = append(out, adapters[:idx]...)
+
 	out = append(out, adapters[idx+1:]...)
+
 	return out
+
 }
 
 func selectedModelFor(cfgDir string, purpose string) string {
+
 	c, err := readConfig(cfgDir)
+
 	if err != nil {
+
 		return ""
+
 	}
+
 	switch purpose {
+
 	case "commit":
+
 		return strings.TrimSpace(c.CommitModelID)
+
 	case "review":
+
 		return strings.TrimSpace(c.ReviewModelID)
+
 	default:
+
 		return ""
+
 	}
+
 }
 
 func (s *ProxyService) SetStateCallback(cb func(running bool)) {
+
 	s.mu.Lock()
+
 	s.onStateChange = cb
+
 	s.mu.Unlock()
+
 }
 
 // SetQuitCallback registers the function main.go uses to fully tear the
+
 // app down (Stop proxy, remove tray icon, quit the Wails application).
+
 // Invoked from RequestQuit so the frontend close dialog can exit cleanly.
+
 func (s *ProxyService) SetQuitCallback(cb func()) {
+
 	s.mu.Lock()
+
 	s.quitCb = cb
+
 	s.mu.Unlock()
+
 }
 
 // SetHideCallback registers the function main.go uses to hide the main
+
 // window to the system tray (keeping the proxy and tray icon alive).
+
 func (s *ProxyService) SetHideCallback(cb func()) {
+
 	s.mu.Lock()
+
 	s.hideCb = cb
+
 	s.mu.Unlock()
+
 }
 
 // GetCloseAction returns the persisted close-behaviour preference
+
 // ("" = ask, "quit", "tray"). Unbound errors from config.json are swallowed
+
 // — a missing or malformed config just maps to "ask the user".
+
 func (s *ProxyService) GetCloseAction() string {
+
 	cfg, err := readConfig(s.cfgDir)
+
 	if err != nil {
+
 		return ""
+
 	}
+
 	switch cfg.CloseAction {
+
 	case "quit", "tray":
+
 		return cfg.CloseAction
+
 	default:
+
 		return ""
+
 	}
+
 }
 
 // SetCloseAction persists the user's choice from the close dialog. "quit"
+
 // and "tray" are the only meaningful values; anything else is normalised
+
 // to "" (which makes the dialog reappear on the next close — a safe reset).
+
 func (s *ProxyService) SetCloseAction(action string) error {
+
 	cfg, err := readConfig(s.cfgDir)
+
 	if err != nil {
+
 		return err
+
 	}
+
 	switch action {
+
 	case "quit", "tray":
+
 		cfg.CloseAction = action
+
 	default:
+
 		cfg.CloseAction = ""
+
 	}
+
 	b, err := json.MarshalIndent(cfg, "", "  ")
+
 	if err != nil {
+
 		return err
+
 	}
+
 	return os.WriteFile(filepath.Join(s.cfgDir, "config.json"), b, 0o600)
+
 }
 
 // RequestQuit triggers the registered quit callback. Called from the
+
 // frontend close dialog's "Quit" button. Runs the callback on its own
+
 // goroutine so the Wails RPC returns before the app actually tears down.
+
 func (s *ProxyService) RequestQuit() {
+
 	s.mu.RLock()
+
 	cb := s.quitCb
+
 	s.mu.RUnlock()
+
 	if cb != nil {
+
 		go cb()
+
 	}
+
 }
 
 // RequestHide triggers the registered hide-to-tray callback. Called from
+
 // the frontend close dialog's "Minimize to tray" button.
+
 func (s *ProxyService) RequestHide() {
+
 	s.mu.RLock()
+
 	cb := s.hideCb
+
 	s.mu.RUnlock()
+
 	if cb != nil {
+
 		go cb()
+
 	}
+
 }
 
 func (s *ProxyService) fireState() {
+
 	cb := s.onStateChange
+
 	running := s.state.Running
+
 	if cb != nil {
+
 		cb(running)
+
 	}
+
 }
 
 func detectCAInstallMode() string {
+
 	switch runtime.GOOS {
+
 	case "windows":
+
 		return "auto-user-store"
+
 	case "darwin":
+
 		return "auto-login-keychain"
+
 	case "linux":
+
 		if certs.IsInstalledUserRoot() {
+
 			return "auto-nss"
+
 		}
+
 		return "manual-or-nss"
+
 	default:
+
 		return "manual"
+
 	}
+
 }
 
 func buildCAWarning() string {
+
 	switch runtime.GOOS {
+
 	case "linux":
+
 		if certs.IsInstalledUserRoot() {
+
 			return "Linux trust is currently wired through the user's NSS DB (~/.pki/nssdb). Other apps may still need a manual system-store import of the CA PEM from the settings folder."
+
 		}
+
 		return "Linux has no single cross-desktop trust store. cursor-byok can import into the user's NSS DB when certutil is installed, but other apps may still require a manual system-store import of the CA PEM from the settings folder."
+
 	case "darwin":
+
 		return "macOS trust is installed into the current user's login keychain. If Keychain prompts for permission, approve it for Cursor to trust the local MITM CA."
+
 	default:
+
 		return ""
+
 	}
+
 }
 
 func NewProxyService() (*ProxyService, error) {
+
 	dir, err := cfgDir()
+
 	if err != nil {
+
 		return nil, err
+
 	}
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+
 		return nil, err
+
 	}
+
 	ca, err := certs.LoadOrCreate(filepath.Join(dir, "ca"))
+
 	if err != nil {
+
 		return nil, err
+
 	}
+
 	gw := relay.NewGateway()
+
 	// Persist chat turns under %APPDATA%/cursor-byok/history so conversations
+
 	// survive restart. The agent package walks this on first use and loads
+
 	// every <conv_id>.jsonl back into its in-memory session history.
+
 	agent.InitHistoryDir(filepath.Join(dir, "history"))
+
 	cfg, _ := readConfig(dir)
+
 	baseURL := cfg.BaseURL
+
 	if baseURL == "" {
+
 		baseURL = defaultUpstream
+
 	}
+
 	svc := &ProxyService{
-		cfgDir:  dir,
-		ca:      ca,
+
+		cfgDir: dir,
+
+		ca: ca,
+
 		gateway: gw,
+
 		state: ProxyState{
-			ListenAddr:    defaultListenAddr,
-			BaseURL:       baseURL,
+
+			ListenAddr: defaultListenAddr,
+
+			BaseURL: baseURL,
+
 			CAFingerprint: ca.Fingerprint(),
-			CAPath:        filepath.Join(ca.Dir(), "ca.crt"),
-			CAInstalled:   certs.IsInstalledUserRoot(),
+
+			CAPath: filepath.Join(ca.Dir(), "ca.crt"),
+
+			CAInstalled: certs.IsInstalledUserRoot(),
+
 			CAInstallMode: detectCAInstallMode(),
-			CAWarning:     buildCAWarning(),
+
+			CAWarning: buildCAWarning(),
 		},
 	}
+
 	svc.gatewayAdapters = func() []relay.AdapterInfo { return adapterListFor(svc.cfgDir) }
+
 	gw.SetAdapterProvider(func() []relay.AdapterInfo {
+
 		c, err := readConfig(svc.cfgDir)
+
 		if err != nil {
+
 			return nil
+
 		}
+
 		return adapterListFromConfig(c)
+
 	})
+
 	return svc, nil
+
 }
 
 func (s *ProxyService) GetState() ProxyState {
+
 	s.mu.RLock()
+
 	defer s.mu.RUnlock()
+
 	st := s.state
+
 	st.CAInstalled = certs.IsInstalledUserRoot()
+
 	st.CAInstallMode = detectCAInstallMode()
+
 	st.CAWarning = buildCAWarning()
+
 	return st
+
 }
 
 func (s *ProxyService) InstallCA() (ProxyState, error) {
+
 	if err := certs.InstallUserRoot(filepath.Join(s.ca.Dir(), "ca.crt")); err != nil {
+
 		s.mu.Lock()
+
 		s.state.LastError = err.Error()
+
 		s.mu.Unlock()
+
 		return s.GetState(), err
+
 	}
+
 	s.mu.Lock()
+
 	s.state.CAInstalled = true
+
 	s.state.LastError = ""
+
 	s.mu.Unlock()
+
 	return s.GetState(), nil
+
 }
 
 func (s *ProxyService) UninstallCA() (ProxyState, error) {
+
 	if err := certs.UninstallUserRoot(); err != nil {
+
 		s.mu.Lock()
+
 		s.state.LastError = err.Error()
+
 		s.mu.Unlock()
+
 		return s.GetState(), err
+
 	}
+
 	s.mu.Lock()
+
 	s.state.CAInstalled = false
+
 	s.state.LastError = ""
+
 	s.mu.Unlock()
+
 	return s.GetState(), nil
+
 }
 
 func (s *ProxyService) StartProxy() (ProxyState, error) {
+
 	s.mu.Lock()
+
 	defer s.mu.Unlock()
+
 	if s.state.Running {
+
 		return s.state, nil
+
 	}
+
 	_, _ = readConfig(s.cfgDir)
+
 	s.state.ListenAddr = defaultListenAddr
+
 	listen := defaultListenAddr
-		resolver := func() []agent.AdapterTarget {
-			ads := s.gatewayAdapters()
-			out := make([]agent.AdapterTarget, 0, len(ads))
-			for _, a := range ads {
-				out = append(out, agent.AdapterTargetFromRelay(a))
-			}
-			return out
+
+	resolver := func() []agent.AdapterTarget {
+
+		ads := s.gatewayAdapters()
+
+		out := make([]agent.AdapterTarget, 0, len(ads))
+
+		for _, a := range ads {
+
+			out = append(out, agent.AdapterTargetFromRelay(a))
+
 		}
-		selectedModel := func(purpose string) string { return selectedModelFor(s.cfgDir, purpose) }
-		srv, err := mitm.New(listen, s.ca, s.gateway, resolver, selectedModel)
+
+		return out
+
+	}
+
+	selectedModel := func(purpose string) string { return selectedModelFor(s.cfgDir, purpose) }
+
+	srv, err := mitm.New(listen, s.ca, s.gateway, resolver, selectedModel)
+
 	if err != nil {
+
 		s.state.LastError = err.Error()
+
 		return s.state, err
+
 	}
+
 	if err := srv.Start(); err != nil {
+
 		s.state.LastError = err.Error()
+
 		return s.state, err
+
 	}
+
 	if err := cursor.EnableSystemProxy(s.state.ListenAddr); err != nil {
+
 		_ = srv.Stop(context.Background())
+
 		s.state.LastError = "proxy started but couldn't update system settings: " + err.Error()
+
 		return s.state, err
+
 	}
+
 	// Non-fatal start errors go into warnings so the caller still gets a
+
 	// "Running" state for the parts that did succeed — but the UI can
+
 	// surface the partial failures instead of reporting a clean start.
+
 	var warnings []string
+
 	if err := cursor.ApplyCursorTweaks(s.state.ListenAddr); err != nil {
+
 		warnings = append(warnings, "Cursor settings.json tweak failed: "+err.Error())
+
 	}
+
 	// Inject the synthetic Pro session into Cursor's SQLite. Cursor reads
+
 	// these auth keys at startup and renders "logged-in Pro user" UI when
+
 	// they look valid; combined with the auth-endpoint MITM mocks this
+
 	// unlocks BYOK on the chat picker without a real cursor.com account.
+
 	// The previous values are saved to backupPath so Stop can restore the
+
 	// user's real Cursor account — without this the user gets stuck with
+
 	// our fake JWT after disabling the proxy and Cursor refuses to log in
+
 	// against the real api2.cursor.sh.
+
 	if err := cursor.InjectFakeProUser(s.authBackupPath()); err != nil {
+
 		warnings = append(warnings, "Cursor SQLite Pro inject failed: "+err.Error())
+
 	}
+
 	if adapters := s.gatewayAdapters(); len(adapters) > 0 {
+
 		// Pin every Cursor feature (composer / cmd-K / agent / etc.) at the
+
 		// first BYOK adapter. Without this Cursor's picker reads a stale
+
 		// selection from SQLite and renders nothing because the cached id
+
 		// no longer matches our AvailableModels response.
+
 		if err := cursor.ForceModelSelection(adapters[0].StableID()); err != nil {
+
 			warnings = append(warnings, "Cursor SQLite model pin failed: "+err.Error())
+
 		}
+
 	}
+
 	s.proxy = srv
+
 	s.state.Running = true
+
 	s.state.StartedAt = time.Now().Unix()
+
 	if len(warnings) > 0 {
+
 		// Preserve every non-fatal failure so the UI can surface them —
+
 		// clearing LastError here would have hidden e.g. a failed
+
 		// settings.json tweak behind a "clean start" banner.
+
 		s.state.LastError = "Partial start: " + strings.Join(warnings, "; ")
+
 	} else {
+
 		s.state.LastError = ""
+
 	}
+
 	s.fireState()
+
 	return s.state, nil
+
 }
 
 func (s *ProxyService) StopProxy() (ProxyState, error) {
+
 	s.mu.Lock()
+
 	defer s.mu.Unlock()
+
 	if !s.state.Running {
+
 		return s.state, nil
+
 	}
+
 	_ = cursor.DisableSystemProxy()
+
 	_ = cursor.RevertCursorTweaks()
+
 	// Put the user's original Cursor auth back so Cursor can log in against
+
 	// the real api2.cursor.sh once it's no longer routed through us. Failure
+
 	// here is non-fatal; we'd rather report stopped than block the UI.
+
 	if err := cursor.RestoreFakeProUser(s.authBackupPath()); err != nil {
+
 		s.state.LastError = "Cursor SQLite auth restore failed: " + err.Error()
+
 	}
+
 	if s.proxy != nil {
+
 		_ = s.proxy.Stop(context.Background())
+
 		s.proxy = nil
+
 	}
+
 	s.state.Running = false
+
 	s.state.StartedAt = 0
+
 	s.fireState()
+
 	return s.state, nil
+
 }
 
 // authBackupPath returns the JSON sidecar where we stash the user's
+
 // original cursorAuth/* values before injecting our fake Pro session.
+
 func (s *ProxyService) authBackupPath() string {
+
 	return filepath.Join(s.cfgDir, "cursor-auth-backup.json")
+
 }
 
 func (s *ProxyService) SetBaseURL(url string) (ProxyState, error) {
+
 	s.mu.Lock()
+
 	defer s.mu.Unlock()
+
 	if url == "" {
+
 		return s.state, errors.New("base URL cannot be empty")
+
 	}
+
 	s.state.BaseURL = url
+
 	return s.state, nil
+
 }
 
 func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
+
 	return readConfig(s.cfgDir)
+
 }
 
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
+
 	cfg.ActiveModelID = strings.TrimSpace(cfg.ActiveModelID)
+
 	if cfg.ActiveModelID != "" {
+
 		found := false
+
 		for _, a := range cfg.ModelAdapters {
+
 			if strings.EqualFold(strings.TrimSpace(a.ModelID), cfg.ActiveModelID) {
+
 				found = true
+
 				break
+
 			}
+
 		}
+
 		if !found {
+
 			cfg.ActiveModelID = ""
+
 		}
+
 	}
+
 	b, err := json.MarshalIndent(cfg, "", "  ")
+
 	if err != nil {
+
 		return err
+
 	}
+
 	return os.WriteFile(filepath.Join(s.cfgDir, "config.json"), b, 0o600)
+
 }
 
 func (s *ProxyService) ExportCAPEM() string {
+
 	return string(s.ca.CertPEM())
+
 }
 
 func (s *ProxyService) ConfigDir() string {
+
 	return s.cfgDir
+
 }
 
 func (s *ProxyService) OpenSettingsFolder() error {
+
 	path := s.cfgDir
+
 	var cmd *exec.Cmd
+
 	switch runtime.GOOS {
+
 	case "windows":
+
 		cmd = exec.Command("explorer", path)
+
 	case "darwin":
+
 		cmd = exec.Command("open", path)
+
 	default:
+
 		cmd = exec.Command("xdg-open", path)
+
 	}
+
 	return cmd.Start()
+
 }
 
 func (s *ProxyService) GetCursorSettingsStatus() CursorSettingsStatus {
+
 	st := cursor.GetStatus()
+
 	return CursorSettingsStatus{
-		Path:            st.Path,
-		Found:           st.Found,
-		Error:           st.Error,
-		ProxySet:        st.ProxySet,
-		ProxyValue:      st.ProxyValue,
-		StrictSSLOff:    st.StrictSSLOff,
-		ProxySupportOn:  st.ProxySupportOn,
+
+		Path: st.Path,
+
+		Found: st.Found,
+
+		Error: st.Error,
+
+		ProxySet: st.ProxySet,
+
+		ProxyValue: st.ProxyValue,
+
+		StrictSSLOff: st.StrictSSLOff,
+
+		ProxySupportOn: st.ProxySupportOn,
+
 		SystemCertsV2On: st.SystemCertsV2On,
-		UseHTTP1:        st.UseHTTP1,
-		DisableHTTP2:    st.DisableHTTP2,
-		ProxyKerberos:   st.ProxyKerberos,
+
+		UseHTTP1: st.UseHTTP1,
+
+		DisableHTTP2: st.DisableHTTP2,
+
+		ProxyKerberos: st.ProxyKerberos,
 	}
+
 }
 
 func (s *ProxyService) ApplyCursorTweaks() (CursorSettingsStatus, error) {
+
 	if err := cursor.ApplyCursorTweaks(s.state.ListenAddr); err != nil {
+
 		return s.GetCursorSettingsStatus(), err
+
 	}
+
 	return s.GetCursorSettingsStatus(), nil
+
 }
 
 func (s *ProxyService) RevertCursorTweaks() (CursorSettingsStatus, error) {
+
 	if err := cursor.RevertCursorTweaks(); err != nil {
+
 		return s.GetCursorSettingsStatus(), err
+
 	}
+
 	return s.GetCursorSettingsStatus(), nil
+
 }
 
 func (s *ProxyService) TestAdapter(index int) (ModelAdapterConfig, error) {
+
 	cfg, err := readConfig(s.cfgDir)
+
 	if err != nil {
+
 		return ModelAdapterConfig{}, err
+
 	}
+
 	if index < 0 || index >= len(cfg.ModelAdapters) {
+
 		return ModelAdapterConfig{}, errors.New("adapter index out of range")
+
 	}
+
 	a := cfg.ModelAdapters[index]
 
 	if a.APIKey == "" {
+
 		a.LastTestResult = "missing API key"
+
 	} else if a.BaseURL == "" {
+
 		a.LastTestResult = "missing base URL"
+
 	} else {
+
 		a.LastTestResult = runAdapterPing(a)
+
 	}
 
 	a.LastTestedAt = time.Now().Unix()
+
 	cfg.ModelAdapters[index] = a
+
 	_ = s.SaveUserConfig(cfg)
+
 	return a, nil
+
 }
 
 func runAdapterPing(a ModelAdapterConfig) string {
+
 	if a.ModelID == "" {
+
 		return "missing model id"
+
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+
 	defer cancel()
+
 	msg, err := runAdapterInferenceTest(ctx, a)
+
 	if err != nil {
+
 		return err.Error()
+
 	}
+
 	if strings.TrimSpace(msg) == "" {
+
 		return "ok"
+
 	}
+
 	return "ok"
+
 }
 
 func runAdapterInferenceTest(ctx context.Context, a ModelAdapterConfig) (string, error) {
+
 	base := strings.TrimRight(a.BaseURL, "/")
+
 	var url string
+
 	req := (*http.Request)(nil)
+
 	var err error
+
 	switch strings.ToLower(a.Type) {
+
 	case "anthropic":
+
 		url = base + "/v1/messages"
+
 		payload := strings.NewReader(`{"model":` + strconv.Quote(a.ModelID) + `,"max_tokens":16,"messages":[{"role":"user","content":"Reply with OK only."}]}`)
+
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
+
 		if err != nil {
+
 			return "", errors.New("bad URL: " + err.Error())
+
 		}
+
 		req.Header.Set("Content-Type", "application/json")
+
 		req.Header.Set("x-api-key", a.APIKey)
+
 		req.Header.Set("anthropic-version", "2023-06-01")
+
 	default:
+
 		url = base + "/chat/completions"
+
 		payload := strings.NewReader(`{"model":` + strconv.Quote(a.ModelID) + `,"messages":[{"role":"user","content":"Reply with OK only."}],"max_tokens":16}`)
+
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
+
 		if err != nil {
+
 			return "", errors.New("bad URL: " + err.Error())
+
 		}
+
 		req.Header.Set("Content-Type", "application/json")
+
 		req.Header.Set("Authorization", "Bearer "+a.APIKey)
+
 	}
+
 	client := &http.Client{Timeout: 20 * time.Second}
+
 	resp, err := client.Do(req)
+
 	if err != nil {
+
 		return "", errors.New("network error: " + trimErr(err))
+
 	}
+
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+
 		return strings.TrimSpace(string(body)), nil
+
 	}
+
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+
 	snippet := strings.TrimSpace(string(body))
+
 	if len(snippet) > 140 {
+
 		snippet = snippet[:140] + "…"
+
 	}
+
 	return "", fmt.Errorf("http %d — %s", resp.StatusCode, snippet)
+
 }
 
 func trimErr(err error) string {
+
 	msg := err.Error()
+
 	if len(msg) > 160 {
+
 		return msg[:160] + "…"
+
 	}
+
 	return msg
+
 }
 
 // GetUsageStats returns the aggregate token-use snapshot the Stats tab in the
+
 // Wails UI renders. Computed on demand from disk; safe to call any time
+
 // (even while the proxy is stopped — history persists across restarts).
+
 func (s *ProxyService) GetUsageStats() UsageStats {
+
 	snap := agent.ComputeUsageStats()
+
 	out := UsageStats{
-		TotalPromptTokens:     snap.TotalPromptTokens,
+
+		TotalPromptTokens: snap.TotalPromptTokens,
+
 		TotalCompletionTokens: snap.TotalCompletionTokens,
-		TotalTokens:           snap.TotalTokens,
-		ConversationCount:     snap.ConversationCount,
-		TurnCount:             snap.TurnCount,
-		PerModel:              make([]ModelUsageEntry, 0, len(snap.PerModel)),
-		Last7Days:             make([]DailyUsageEntry, 0, len(snap.Last7Days)),
+
+		TotalTokens: snap.TotalTokens,
+
+		ConversationCount: snap.ConversationCount,
+
+		TurnCount: snap.TurnCount,
+
+		PerModel: make([]ModelUsageEntry, 0, len(snap.PerModel)),
+
+		Last7Days: make([]DailyUsageEntry, 0, len(snap.Last7Days)),
 	}
+
 	for _, m := range snap.PerModel {
+
 		out.PerModel = append(out.PerModel, ModelUsageEntry{
-			Model:            m.Model,
-			Provider:         m.Provider,
-			PromptTokens:     m.PromptTokens,
+
+			Model: m.Model,
+
+			Provider: m.Provider,
+
+			PromptTokens: m.PromptTokens,
+
 			CompletionTokens: m.CompletionTokens,
-			TurnCount:        m.TurnCount,
+
+			TurnCount: m.TurnCount,
 		})
+
 	}
+
 	for _, d := range snap.Last7Days {
+
 		out.Last7Days = append(out.Last7Days, DailyUsageEntry{
-			Date:             d.Date,
-			PromptTokens:     d.PromptTokens,
+
+			Date: d.Date,
+
+			PromptTokens: d.PromptTokens,
+
 			CompletionTokens: d.CompletionTokens,
 		})
+
 	}
+
 	return out
+
 }
 
 func (s *ProxyService) Shutdown() {
+
 	_, _ = s.StopProxy()
+
 }
 
 func readConfig(dir string) (UserConfig, error) {
+
 	cfg := UserConfig{BaseURL: defaultUpstream}
+
 	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
+
 	if err != nil {
+
 		if os.IsNotExist(err) {
+
 			return cfg, nil
+
 		}
+
 		return cfg, err
+
 	}
+
 	_ = json.Unmarshal(b, &cfg)
+
 	if cfg.BaseURL == "" {
+
 		cfg.BaseURL = defaultUpstream
+
 	}
+
 	return cfg, nil
+
 }
 
 func parseIntSafe(s string) int {
+
 	if s == "" {
+
 		return 0
+
 	}
+
 	var n int
+
 	for _, ch := range s {
+
 		if ch >= '0' && ch <= '9' {
+
 			n = n*10 + int(ch-'0')
+
 		}
+
 	}
+
 	return n
+
 }
 
 func cfgDir() (string, error) {
+
 	base, err := os.UserConfigDir()
+
 	if err != nil {
+
 		return "", err
+
 	}
+
 	return filepath.Join(base, "cursor-byok"), nil
+
 }

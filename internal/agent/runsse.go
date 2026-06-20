@@ -2,17 +2,29 @@ package agent
 
 import (
 	"context"
+
 	agentv1 "cursor-byok/internal/protocodec/gen/agent/v1"
+
 	aiserverv1 "cursor-byok/internal/protocodec/gen/aiserver/v1"
+
 	"cursor-byok/internal/relay"
+
 	"encoding/binary"
+
 	"encoding/json"
+
 	"io"
+
 	"net/http"
+
 	"strconv"
+
 	"strings"
+
 	"sync"
+
 	"sync/atomic"
+
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -141,8 +153,7 @@ func AdapterTargetFromRelay(a relay.AdapterInfo) AdapterTarget {
 			MaxOutputTokens: a.MaxOutputTokens,
 
 			ThinkingBudget: a.ThinkingBudget,
-
-			ContextWindow: a.ContextWindow,
+			ContextWindow:  a.ContextWindow,
 		},
 	}
 
