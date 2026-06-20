@@ -71,6 +71,7 @@ func adapterListFromConfig(c UserConfig) []relay.AdapterInfo {
 			ServiceTier:     a.ServiceTier,
 			MaxOutputTokens: parseIntSafe(a.MaxOutputTokens),
 			ThinkingBudget:  parseIntSafe(a.ThinkingBudget),
+			ContextWindow:   parseIntSafe(a.ContextWindow),
 		})
 	}
 	return prioritizeActiveAdapter(out, strings.TrimSpace(c.ActiveModelID))

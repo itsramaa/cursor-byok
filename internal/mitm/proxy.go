@@ -54,7 +54,23 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsCfg}
 
 	p := goproxy.NewProxyHttpServer()
-	p.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	// mitmHosts: only intercept TLS for Cursor endpoints.
+	// All other HTTPS CONNECT (pip, browser, npm…) is tunnelled as-is so
+	// non-Cursor apps on the Windows system proxy never get WRONG_VERSION_NUMBER.
+	mitmHosts := map[string]struct{}{
+		"api2.cursor.sh":                    {},
+		"api2.cursor.sh:443":                {},
+		"prod.authentication.cursor.sh":     {},
+		"prod.authentication.cursor.sh:443": {},
+		"authentication.cursor.sh":          {},
+		"authentication.cursor.sh:443":      {},
+	}
+	p.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+		if _, ok := mitmHosts[host]; ok {
+			return goproxy.MitmConnect, host
+		}
+		return goproxy.OkConnect, host
+	}))
 
 	// Mimic the working app's "everything secondary is 404" strategy. Cursor
 	// pings dozens of auxiliary RPCs (auth profile, plan info, plugins,

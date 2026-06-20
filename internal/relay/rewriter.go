@@ -27,6 +27,7 @@ type AdapterInfo struct {
 	ServiceTier     string
 	MaxOutputTokens int
 	ThinkingBudget  int
+	ContextWindow   int
 }
 
 // StableID returns a 16-char hex identifier derived from the provider model
