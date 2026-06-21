@@ -284,7 +284,7 @@ func writeBugBotExecRequest(w io.Writer, execID string, execSeq uint32, pc Pendi
 		if a := inner.EditToolCall.Args; a != nil {
 			args.Path = a.Path
 			if a.StreamContent != nil {
-				args.FileText = *a.StreamContent
+				args.FileText = normalizeLineEndingsForFile(args.Path, *a.StreamContent)
 			}
 		}
 		esm.Message = &agentv1.ExecServerMessage_WriteArgs{WriteArgs: args}

@@ -647,10 +647,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 			} else {
 				after = strings.Replace(normBefore, normOld, normNew, 1)
 			}
-			// Preserve original line-ending style on write.
-			if strings.Contains(before, "\r\n") {
-				after = strings.ReplaceAll(after, "\n", "\r\n")
-			}
+			// Normalize line endings to match the target file's convention
+			// (detect existing CRLF/LF, fall back to OS default for new files).
+			after = normalizeLineEndingsForFile(a.Path, after)
 		}
 		return &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_EditToolCall{
@@ -734,6 +733,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 		if body == "" {
 			body = a.Content
 		}
+		// Normalize line endings to match the target file's convention
+		// (detect existing CRLF/LF, fall back to OS default for new files).
+		body = normalizeLineEndingsForFile(a.Path, body)
 		return &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_EditToolCall{
 				EditToolCall: &agentv1.EditToolCall{
@@ -883,7 +885,7 @@ func writeExecRequest(w io.Writer, execID string, execSeq uint32, pc PendingTool
 		if a := inner.EditToolCall.Args; a != nil {
 			args.Path = a.Path
 			if a.StreamContent != nil {
-				args.FileText = *a.StreamContent
+				args.FileText = normalizeLineEndingsForFile(args.Path, *a.StreamContent)
 			}
 		}
 		esm.Message = &agentv1.ExecServerMessage_WriteArgs{WriteArgs: args}
